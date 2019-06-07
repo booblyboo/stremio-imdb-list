@@ -1,0 +1,14 @@
+{
+  "listUrl": {
+    "title": "IMDB List URL",
+    "type": "string",
+    "default": "",
+    "required": true
+  },
+  "sort": {
+    "title": "Sorting",
+    "type": "select",
+    "options": ["List Order", "Popularity", "Alphabetical", "Rating", "Votes", "Release", "Date Added"],
+    "default": "List Order"
+  }
+}
