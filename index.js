@@ -141,7 +141,7 @@ let listId = ''
 async function retrieveRouter() {
 	return new Promise(async (resolve, reject) => {
 		if (!config.listUrl) {
-			reject(Error('IMDB Tag Add-on - No Tag Url'))
+			reject(Error('IMDB List Add-on - No List Url'))
 			return
 		} else {
 			if (!config.listUrl.includes('.imdb.com/list/')) {
