@@ -4,7 +4,7 @@ const { config } = require('internal')
 const { addonBuilder, getRouter } = require('stremio-addon-sdk')
 
 const manifest = {
-	id: 'org.imdblist',
+	id: 'org.imdblist_local',
 	version: '0.0.1',
 	name: 'IMDB List Add-on',
 	description: 'Add-on to create a catalog from IMDB lists.',
