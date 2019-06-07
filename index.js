@@ -1,9 +1,7 @@
 
-const express = require('express')
-const app = express()
-const cors = require('cors')
+const { config } = require('internal')
 
-app.use(cors())
+const { addonBuilder, getRouter } = require('stremio-addon-sdk')
 
 const manifest = {
 	id: 'org.imdblist',
@@ -25,11 +23,7 @@ const manifest = {
 	]
 }
 
-app.get('/:listId/manifest.json', (req, res) => {
-	res.setHeader('Cache-Control', 'max-age=604800') // one week
-	res.setHeader('Content-Type', 'application/json')
-    res.send(manifest)
-})
+const listManifest = {}
 
 const needle = require('needle')
 
@@ -59,24 +53,44 @@ function toMeta(obj) {
 	}
 }
 
-function getList(listId, cb) {
+const sorts = {
+	'List Order': 'list_order%2Casc',
+	'Popularity': 'moviemeter%2Casc',
+	'Alphabetical': 'alpha%2Casc',
+	'Rating': 'user_rating%2Cdesc',
+	'Votes': 'num_votes%2Cdesc',
+	'Release': 'release_date%2Cdesc',
+	'Date Added': 'date_added%2Cdesc'
+}
+
+function getList(listId, sort, cb) {
 	if (listId) {
 		headers.referer = 'https://m.imdb.com/list/'+listId+'/'
-		const getUrl = 'https://m.imdb.com/list/'+listId+'/search?sort=date_added%2Cdesc&view=grid&tracking_tag=&pageId='+listId+'&pageType=list'
+		const getUrl = 'https://m.imdb.com/list/'+listId+'/search?sort='+sorts[sort]+'&view=grid&tracking_tag=&pageId='+listId+'&pageType=list'
 		needle.get(getUrl, { headers }, (err, resp) => {
 			if (!err && resp && resp.body) {
+				const cacheTag = listId + '[]' + sort
 				const jObj = resp.body
 				if (jObj.titles && Object.keys(jObj.titles).length) {
-					manifest.types.forEach(el => { cache[el][listId] = [] })
+					manifest.types.forEach(el => { cache[el][cacheTag] = [] })
 					for (let key in jObj.titles) {
 						const el = jObj.titles[key]
 						const metaType = el.type == 'featureFilm' ? 'movie' : el.type == 'series' ? 'series' : null
 						if (metaType) {
-							cache[metaType][listId].push(toMeta(el))
+							cache[metaType][cacheTag].push(toMeta(el))
 						}
 					}
+					if (jObj.list && jObj.list.name) {
+						const cloneManifest = JSON.parse(JSON.stringify(manifest))
+						cloneManifest.id = 'org.imdblist' + cacheTag
+						cloneManifest.name = jObj.list.name + ' by ' + sort
+						cloneManifest.catalogs.forEach((cat, ij) => {
+							cloneManifest.catalogs[ij].name = jObj.list.name + ' by ' + sort
+						})
+						listManifest[cacheTag] = cloneManifest
+					}
 					setTimeout(() => {
-						manifest.types.forEach(el => { cache[el][listId] = [] })
+						manifest.types.forEach(el => { cache[el][cacheTag] = [] })
 					}, 86400000)
 					cb(false, true)
 				} else 
@@ -91,44 +105,86 @@ function getList(listId, cb) {
 const namedQueue = require('named-queue')
 
 const queue = new namedQueue((task, cb) => {
-	getList(task.id, cb)
+	const id = task.id.split('[]')[0]
+	const sort = task.id.split('[]')[1]
+	getList(id, sort, cb)
 }, Infinity)
 
 const cache = { movie: {}, series: {} }
 
-app.get('/:listId/catalog/:type/:id.json', (req, res) => {
-	function fail(err) {
-		console.error(err)
-		res.writeHead(500)
-		res.end(JSON.stringify({ err: 'handler error' }))
-	}
-	function respond(msg) {
-		res.setHeader('Cache-Control', 'max-age=86400') // one day
-		res.setHeader('Content-Type', 'application/json')
-		res.send(msg)
-	}
-	function fetch() {
-		queue.push({ id: req.params.listId }, (err, done) => {
-			if (done) {
-				const userData = cache[req.params.type][req.params.listId]
-				respond(JSON.stringify({ metas: userData }))
-			} else 
-				fail(err || 'Could not get list items')
-		})
-	}
-	if (req.params.listId && ['movie','series'].indexOf(req.params.type) > -1) {
-		if (cache[req.params.type][req.params.listId]) {
-			const userData = cache[req.params.type][req.params.listId]
-			if (userData.length)
-				respond(JSON.stringify({ metas: userData }))
-			else
-				fetch()
-		} else
-			fetch()
-	} else
-		fail('Unknown request parameters')
-})
+function retrieveManifest() {
+	return new Promise((resolve, reject) => {
+		const cacheTag = listId + '[]' + config.sort
+		function tryRespond() {
+			if (listManifest[cacheTag]) {
+				resolve(listManifest[cacheTag])
+				return true
+			} else
+				return false
+		}
+		const responded = tryRespond()
+		if (!responded) {
+			queue.push({ id: cacheTag }, (err, done) => {
+				if (done) {
+					const tryAgain = tryRespond()
+					if (tryAgain)
+						return
+				}
+				resolve(manifest)
+			})
+		}
+	})
+}
 
-app.listen(7515, () => {
-    console.log('http://127.0.0.1:7515/[imdb-list-id]/manifest.json')
-})
+let listId = ''
+
+async function retrieveRouter() {
+	return new Promise(async (resolve, reject) => {
+		if (!config.listUrl) {
+			reject(Error('IMDB Tag Add-on - No Tag Url'))
+			return
+		} else {
+			if (!config.listUrl.includes('.imdb.com/list/')) {
+				// https://www.imdb.com/list/ls047677021/
+				reject(Error('IMDB List Add-on - Invalid IMDB List URL, it should be in the form of: https://www.imdb.com/list/ls047677021/'))
+				return
+			} else {
+				let tempId = config.listUrl.split('/list/')[1]
+				if (tempId.includes('/'))
+					tempId = tempId.split('/')[0]
+				listId = tempId
+			}
+		}
+		const manifest = await retrieveManifest()
+		const builder = new addonBuilder(manifest)
+		builder.defineCatalogHandler(args => {
+			return new Promise((resolve, reject) => {
+				const cacheTag = listId + '[]' + (config.sort || 'list_order')
+				function fetch() {
+					queue.push({ id: cacheTag }, (err, done) => {
+						if (done) {
+							const userData = cache[args.type][cacheTag]
+							resolve({ metas: userData, cacheMaxAge: 86400 }) // one day
+						} else 
+							reject(err || Error('Could not get list items'))
+					})
+				}
+				if (listId && ['movie','series'].indexOf(args.type) > -1) {
+					if (cache[args.type][cacheTag]) {
+						const userData = cache[args.type][cacheTag]
+						if (userData.length)
+							resolve({ metas: userData, cacheMaxAge: 86400 }) // one day
+						else
+							fetch()
+					} else
+						fetch()
+				} else
+					reject(Error('Unknown request parameters'))
+			})
+		})
+
+		resolve(getRouter(builder.getInterface()))
+	})
+}
+
+module.exports = retrieveRouter()
